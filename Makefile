@@ -19,7 +19,7 @@ QEMU_OPTS += -device virtio-serial-pci -device virtconsole,chardev=stdio
 QEMU_OPTS += -mon chardev=stdio -display none
 
 run: $(KERNEL) $(INITRD)
-	$(QEMU) $(QEMU_OPTS) -kernel $(KERNEL) -initrd $(INITRD)
+	timeout 4s $(QEMU) $(QEMU_OPTS) -kernel $(KERNEL) -initrd $(INITRD)
 
 kill:
 	test -f $(PIDFILE) && kill $(file <$(PIDFILE))
