@@ -1,0 +1,10 @@
+.flag.*
+alpine-*tar.gz*
+vmlinuz
+bzImage
+initrd.*
+root
+linux
+.pid
+.monitor.sock
+config.~*~
