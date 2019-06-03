@@ -41,26 +41,33 @@ static int setup_netlink(int flags)
 struct outbound_msg {
     uint16_t type; uint32_t flags;
     void* buf; size_t len;
+    uint32_t seq;
 
     struct outbound_msg* next;
 };
 
 static struct outbound_msg* outbound_queue;
 
-static void enqueue_outbound(uint16_t type, uint32_t flags,
-                             const void* buf, size_t len)
+static uint32_t enqueue_outbound(uint16_t type, uint32_t flags,
+                                 const void* buf, size_t len)
 {
+    static uint32_t seq;
+
     struct outbound_msg* m = calloc(sizeof(*m), 1);
     if(!m) err(1, "calloc");
 
     m->type = type; m->flags = flags; m->len = len;
     m->buf = malloc(len); if(!m->buf) err(1, "malloc");
+    m->seq = seq++;
     memcpy(m->buf, buf, len);
 
     // append
     struct outbound_msg** p = &outbound_queue;
     while(*p != NULL) p = &(*p)->next;
     *p = m;
+
+    printf("enqueued: seq=%"PRIu32"\n", m->seq);
+    return m->seq;
 }
 
 static void dequeue_outbound(void)
@@ -75,7 +82,6 @@ static void dequeue_outbound(void)
 
 static ssize_t send_netlink(int fd, const struct outbound_msg* m)
 {
-    static uint32_t seq;
 
     size_t msg_len = sizeof(struct nlmsghdr) + m->len;
     if(msg_len > UINT32_MAX || m->len >= UINT32_MAX - sizeof(struct nlmsghdr))
@@ -85,7 +91,7 @@ static ssize_t send_netlink(int fd, const struct outbound_msg* m)
         .nlmsg_len = msg_len,
         .nlmsg_type = m->type,
         .nlmsg_flags = m->flags,
-        .nlmsg_seq = seq++,
+        .nlmsg_seq = m->seq,
         .nlmsg_pid = 0,
     };
 
@@ -104,6 +110,8 @@ static ssize_t send_netlink(int fd, const struct outbound_msg* m)
     ssize_t r = sendmsg(fd, &mhd, 0);
     if(r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         perror("sendto"), exit(1);
+
+    printf("sent: seq=%"PRIu32"\n", m->seq);
 
     return r;
 }
@@ -131,8 +139,8 @@ static ssize_t recv_netlink(int fd, void* buf, size_t len)
     if(sa.nl_family != AF_NETLINK || mhd.msg_namelen != sizeof(sa))
         err(1, "wrong kind of message");
 
-    printf("received netlink: type=%"PRIu16" flags=%"PRIu32"\n",
-           nhd.nlmsg_type, nhd.nlmsg_flags);
+    printf("received: seq=%"PRIu32" type=%"PRIu16" flags=%"PRIu32"\n",
+           nhd.nlmsg_seq, nhd.nlmsg_type, nhd.nlmsg_flags);
 
     return r > 0 ? r - sizeof(nhd) : 0;
 }
