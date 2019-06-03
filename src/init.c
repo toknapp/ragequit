@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <err.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -9,10 +10,16 @@
 #include <string.h>
 
 #include <asm/types.h>
+#include <linux/genetlink.h>
 #include <linux/netlink.h>
 #include <linux/reboot.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
+
+static_assert(NLMSG_HDRLEN == sizeof(struct nlmsghdr),
+              "make sure we don't need any extra alignment (nlmsghdr)");
+static_assert(GENL_HDRLEN == sizeof(struct genlmsghdr),
+              "make sure we don't need any extra alignment (genlmsghdr)");
 
 #define LENGTH(xs) (sizeof(xs)/sizeof((xs)[0]))
 
@@ -173,5 +180,6 @@ int main(void)
     teardown_netlink(nfd);
 
     printf("good bye...\n");
-    reboot(LINUX_REBOOT_CMD_POWER_OFF);
+    (void)reboot(LINUX_REBOOT_CMD_POWER_OFF);
+    perror("reboot(.._POWER_OFF)"), exit(1);
 }
