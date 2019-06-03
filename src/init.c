@@ -25,6 +25,27 @@ static_assert(NLA_HDRLEN == sizeof(struct nlattr),
 
 #define LENGTH(xs) (sizeof(xs)/sizeof((xs)[0]))
 
+const char* interpret_netlink_type(uint16_t type)
+{
+    switch(type) {
+    case 0x02: return "NLMSG_ERROR";
+    case 0x10: return "GENL_ID_CTRL";
+    default:
+        err(3, "not defined type: %"PRIu16, type);
+    }
+}
+
+const char* interpret_netlink_flag(uint32_t flag)
+{
+    switch(flag) {
+    case 0: return "";
+    case 0x100: return "NLM_F_ROOT";
+    case NLM_F_ACK: return "ACK";
+    default:
+        err(3, "not defined flag: %"PRIu32, flag);
+    }
+}
+
 static int setup_netlink(int flags)
 {
     int fd = socket(AF_NETLINK, SOCK_RAW | flags, NETLINK_GENERIC);
@@ -139,8 +160,10 @@ static ssize_t recv_netlink(int fd, void* buf, size_t len)
     if(sa.nl_family != AF_NETLINK || mhd.msg_namelen != sizeof(sa))
         err(1, "wrong kind of message");
 
-    printf("received: seq=%"PRIu32" type=%"PRIu16" flags=%"PRIu32"\n",
-           nhd.nlmsg_seq, nhd.nlmsg_type, nhd.nlmsg_flags);
+    printf("received: seq=%"PRIu32" type=%s flags=%s\n",
+           nhd.nlmsg_seq,
+           interpret_netlink_type(nhd.nlmsg_type),
+           interpret_netlink_flag(nhd.nlmsg_flags));
 
     return r > 0 ? r - sizeof(nhd) : 0;
 }
@@ -199,7 +222,7 @@ static void genl_get_family(void)
         .a1_v = GENL_ID_CTRL,
     };
 
-    enqueue_outbound(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP,
+    enqueue_outbound(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK,
                      &payload, sizeof(payload));
 }
 
