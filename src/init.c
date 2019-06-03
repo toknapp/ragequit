@@ -20,6 +20,8 @@ static_assert(NLMSG_HDRLEN == sizeof(struct nlmsghdr),
               "make sure we don't need any extra alignment (nlmsghdr)");
 static_assert(GENL_HDRLEN == sizeof(struct genlmsghdr),
               "make sure we don't need any extra alignment (genlmsghdr)");
+static_assert(NLA_HDRLEN == sizeof(struct nlattr),
+              "make sure we don't need any extra alignment (nlattr)");
 
 #define LENGTH(xs) (sizeof(xs)/sizeof((xs)[0]))
 
@@ -169,11 +171,35 @@ void run_event_loop(int nfd) {
     }
 }
 
+static void genl_get_family(void)
+{
+
+    struct {
+        struct genlmsghdr ghd;
+        struct nlattr a1_hd; uint32_t a1_v;
+    } payload = {
+        .ghd = {
+            .cmd = CTRL_CMD_GETFAMILY,
+            .version = 1, // TODO: reference for this?
+            0
+        },
+
+        .a1_hd = {
+            .nla_len = sizeof(struct nlattr) + sizeof(uint32_t),
+            .nla_type = CTRL_ATTR_FAMILY_ID
+        },
+        .a1_v = GENL_ID_CTRL,
+    };
+
+    enqueue_outbound(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP,
+                     &payload, sizeof(payload));
+}
+
 int main(void)
 {
     printf("hello\n");
 
-    enqueue_outbound(0, NLM_F_ACK, "foo", 3);
+    genl_get_family();
 
     int nfd = setup_netlink(SOCK_NONBLOCK | SOCK_CLOEXEC);
     run_event_loop(nfd);
