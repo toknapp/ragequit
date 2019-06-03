@@ -7,7 +7,7 @@ KERNEL_CONFIG = config
 PIDFILE = .pid
 MONITOR_SOCK = .monitor.sock
 KERNEL = bzImage
-INITRD = initrd.cpio.gz
+INITRD = initrd.cpio
 
 # qemu
 QEMU_OPTS = -pidfile $(PIDFILE) -no-reboot
@@ -25,7 +25,13 @@ kill:
 	test -f $(PIDFILE) && kill $(file <$(PIDFILE))
 
 power-off:
-	echo "system_power" | socat - UNIX-CONNECT:$(MONITOR_SOCK) > /dev/null
+	[ -S $(MONITOR_SOCK) ] \
+		&& socat - UNIX-CONNECT:$(MONITOR_SOCK) > /dev/null <<< "system_power" \
+		&& echo 1>&2 "power-off" \
+		|| echo 1>&2 "no socket: $(MONITOR_SOCK)"
+
+power-off-loop:
+	while sleep 1; do make --no-print-directory --silent power-off; done
 
 stop:
 	echo "quit" | socat - UNIX-CONNECT:$(MONITOR_SOCK) > /dev/null
@@ -36,7 +42,7 @@ $(INITRD):
 	rm -rf $(BUILD)
 	mkdir -p $(BUILD)
 	$(MAKE) -C src install
-	(cd $(BUILD) && find . | cpio --quiet -H newc -o | gzip) > $@
+	(cd $(BUILD) && find . | cpio --quiet -H newc -o) > $@
 
 # kernel
 $(KERNEL): config
@@ -55,6 +61,7 @@ $(KERNEL_ROOT):
 # auxiliary
 clean:
 	rm -rf root
+	$(MAKE) -C src clean
 
 .PHONY: run kill power-off stop
 .PHONY: clean
