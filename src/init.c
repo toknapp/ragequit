@@ -162,12 +162,46 @@ static void parse_new_family_payload(const void* buf, size_t len)
 {
     while(len > 0) {
         struct nlattr* a = (struct nlattr*)buf;
-        printf("new family attr: type=%"PRIu16" len=%"PRIu16"\n",
-               a->nla_type, a->nla_len);
 
         if(a->nla_type == CTRL_ATTR_FAMILY_ID) {
             uint16_t id = *(uint16_t*)(buf + NLA_HDRLEN);
             printf("family id=%"PRIu16"\n", id);
+        }
+
+        if(a->nla_type == CTRL_ATTR_MCAST_GROUPS) {
+            size_t l = NLA_ALIGN(a->nla_len) - NLA_HDRLEN;
+            const void *b = buf + NLA_HDRLEN;
+
+            while(l > 0) {
+                struct nlattr* g = (struct nlattr*)b;
+                size_t j = NLA_ALIGN(g->nla_len) - NLA_HDRLEN;
+                const void *c = b + NLA_HDRLEN;
+
+                int64_t gid = -1;
+                const char* name = NULL;
+
+                while(j > 0) {
+                    struct nlattr* ga = (struct nlattr*)c;
+
+                    switch(ga->nla_type) {
+                    case CTRL_ATTR_MCAST_GRP_ID:
+                        gid = *(uint32_t*)(c + NLA_HDRLEN); break;
+                    case CTRL_ATTR_MCAST_GRP_NAME:
+                        name = c + NLA_HDRLEN; break;
+                    default: err(1, "unexpected attr type in a mcast group");
+                    }
+
+                    c += NLA_ALIGN(ga->nla_len);
+                    j -= NLA_ALIGN(ga->nla_len);
+                }
+
+                if(gid == -1 || name == NULL) err(1, "malformed mcast group");
+
+                printf("found mcast group: name=%s id=%"PRId64"\n", name, gid);
+
+                b += NLA_ALIGN(g->nla_len);
+                l -= NLA_ALIGN(g->nla_len);
+            }
         }
 
         buf += NLA_ALIGN(a->nla_len);
