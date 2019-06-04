@@ -26,7 +26,7 @@ kill:
 
 power-off:
 	[ -S $(MONITOR_SOCK) ] \
-		&& socat - UNIX-CONNECT:$(MONITOR_SOCK) > /dev/null <<< "system_power" \
+		&& socat - UNIX-CONNECT:$(MONITOR_SOCK) > /dev/null <<< "system_powerdown" \
 		&& echo 1>&2 "power-off" \
 		|| echo 1>&2 "no socket: $(MONITOR_SOCK)"
 
