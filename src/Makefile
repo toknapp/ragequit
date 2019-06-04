@@ -5,7 +5,7 @@ CFLAGS := -Werror -Wall -fPIE -fstack-protector-all -D_FORTIFY_SOURCE=2
 EXTRA_CFLAGS ?= -g0 -O2
 LDFLAGS := -static
 
-init: init.c
+init: init.c ragequit.h
 	$(GCC) $(LDFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) -o $@ $^
 
 install: init
