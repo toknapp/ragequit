@@ -22,6 +22,13 @@ static_assert(GENL_HDRLEN == sizeof(struct genlmsghdr),
               "make sure we don't need any extra alignment (genlmsghdr)");
 static_assert(NLA_HDRLEN == sizeof(struct nlattr),
               "make sure we don't need any extra alignment (nlattr)");
+// drivers/acpi/event.c:78
+// https://github.com/torvalds/linux/blob/788a024921c48985939f8241c1ff862a7374d8f9/drivers/acpi/event.c#L78
+#define ACPI_GENL_FAMILY_NAME "acpi_event"
+#define ACPI_GENL_FAMILY_NAME_LEN 10
+#define ACPI_GENL_VERSION 0x01
+#define ACPI_GENL_MCAST_GROUP_NAM "acpi_mc_group"
+#define ACPI_GENL_MCAST_GROUP_NAM_LEN 13
 
 #define LENGTH(xs) (sizeof(xs)/sizeof((xs)[0]))
 
@@ -158,6 +165,18 @@ static ssize_t send_netlink(int fd, const struct outbound_msg* m)
     return r;
 }
 
+int nfd;
+
+static void handle_mcast_group(const char* name, uint32_t gid)
+{
+    if(strncmp(name, ACPI_GENL_MCAST_GROUP_NAM,
+               ACPI_GENL_MCAST_GROUP_NAM_LEN) == 0) {
+        int r = setsockopt(nfd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP, &gid, sizeof(gid));
+        if(r != 0) perror("setsockopt()"), exit(1);
+        printf("joined mcast group %s\n", name);
+    }
+}
+
 static void parse_new_family_payload(const void* buf, size_t len)
 {
     while(len > 0) {
@@ -172,7 +191,7 @@ static void parse_new_family_payload(const void* buf, size_t len)
             size_t l = NLA_ALIGN(a->nla_len) - NLA_HDRLEN;
             const void *b = buf + NLA_HDRLEN;
 
-            while(l > 0) {
+            while(l > 0 && l <= len - NLA_HDRLEN) {
                 struct nlattr* g = (struct nlattr*)b;
                 size_t j = NLA_ALIGN(g->nla_len) - NLA_HDRLEN;
                 const void *c = b + NLA_HDRLEN;
@@ -180,7 +199,7 @@ static void parse_new_family_payload(const void* buf, size_t len)
                 int64_t gid = -1;
                 const char* name = NULL;
 
-                while(j > 0) {
+                while(j > 0 && j <= l - NLA_HDRLEN) {
                     struct nlattr* ga = (struct nlattr*)c;
 
                     switch(ga->nla_type) {
@@ -197,7 +216,7 @@ static void parse_new_family_payload(const void* buf, size_t len)
 
                 if(gid == -1 || name == NULL) err(1, "malformed mcast group");
 
-                printf("found mcast group: name=%s id=%"PRId64"\n", name, gid);
+                handle_mcast_group(name, gid);
 
                 b += NLA_ALIGN(g->nla_len);
                 l -= NLA_ALIGN(g->nla_len);
@@ -311,17 +330,11 @@ void run_event_loop(int nfd) {
 static void genl_get_family()
 {
 
-    // drivers/acpi/event.c:78
-    // https://github.com/torvalds/linux/blob/788a024921c48985939f8241c1ff862a7374d8f9/drivers/acpi/event.c#L78
-    //
-    // #define ACPI_GENL_FAMILY_NAME        "acpi_event"
-    // #define ACPI_GENL_VERSION        0x01
-    // #define ACPI_GENL_MCAST_GROUP_NAME   "acpi_mc_group"
-
     struct {
         struct genlmsghdr ghd;
         struct nlattr a1_hd; uint32_t a1_v;
-        struct nlattr a2_hd; char a2_v[NLA_ALIGN(10+1)]; // strlen("acpi_event") + 1
+        struct nlattr a2_hd;
+        char a2_v[NLA_ALIGN(ACPI_GENL_FAMILY_NAME_LEN+1)];
     } payload = {
         .ghd = {
             .cmd = CTRL_CMD_GETFAMILY,
@@ -338,11 +351,11 @@ static void genl_get_family()
         .a1_v = GENL_ID_CTRL,
 
         .a2_hd = {
-            .nla_len = sizeof(struct nlattr) + 10 + 1,
+            .nla_len = sizeof(struct nlattr) + ACPI_GENL_FAMILY_NAME_LEN + 1,
             .nla_type = CTRL_ATTR_FAMILY_NAME,
         },
     };
-    memcpy(payload.a2_v, "acpi_event", 10+1);
+    memcpy(payload.a2_v, ACPI_GENL_FAMILY_NAME, ACPI_GENL_FAMILY_NAME_LEN+1);
 
     enqueue_outbound(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK,
                      &payload, sizeof(payload));
@@ -354,7 +367,7 @@ int main(void)
 
     genl_get_family();
 
-    int nfd = setup_netlink(SOCK_NONBLOCK | SOCK_CLOEXEC);
+    nfd = setup_netlink(SOCK_NONBLOCK | SOCK_CLOEXEC);
     run_event_loop(nfd);
     teardown_netlink(nfd);
 
