@@ -25,11 +25,11 @@ static_assert(NLA_HDRLEN == sizeof(struct nlattr),
 
 #define LENGTH(xs) (sizeof(xs)/sizeof((xs)[0]))
 
-const char* interpret_netlink_type(uint16_t type)
+static const char* interpret_netlink_type(uint16_t type)
 {
     switch(type) {
     case 0x02: return "NLMSG_ERROR";
-    case 0x10: return "GENL_ID_CTRL";
+    case 0x10: return "GENL_ID_CTRL"; // := NLMSG_MIN_TYPE
     default:
         err(3, "not defined type: %"PRIu16, type);
     }
@@ -43,6 +43,26 @@ const char* interpret_netlink_flag(uint32_t flag)
     case NLM_F_ACK: return "ACK";
     default:
         err(3, "not defined flag: %"PRIu32, flag);
+    }
+}
+
+static const char* interpret_netlink_flag_ack(uint32_t flag)
+{
+    switch(flag) {
+    case 0: return "";
+    case NLM_F_CAPPED: return "NLM_F_CAPPED";
+    default:
+        err(3, "not defined flag: %"PRIu32, flag);
+    }
+}
+
+static const char* interpret_genetlink_cmd(uint8_t cmd)
+{
+    switch(cmd) {
+    case CTRL_CMD_NEWFAMILY: return "CTRL_CMD_NEWFAMILY";
+    case CTRL_CMD_GETFAMILY: return "CTRL_CMD_GETFAMILY";
+    default:
+        err(3, "not defined cmd: %"PRIu8, cmd);
     }
 }
 
@@ -132,9 +152,42 @@ static ssize_t send_netlink(int fd, const struct outbound_msg* m)
     if(r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         perror("sendto"), exit(1);
 
-    printf("sent: seq=%"PRIu32"\n", m->seq);
+    printf("sent: seq=%"PRIu32" type=%s\n",
+           m->seq, interpret_netlink_type(m->type));
 
     return r;
+}
+
+static void handle_incoming(const struct nlmsghdr* hd,
+                            const void* buf, size_t len)
+{
+    if(hd->nlmsg_type == NLMSG_ERROR) {
+        struct nlmsgerr* e = (struct nlmsgerr*)buf;
+        if(e->error == 0) {
+            printf("success: msg.seq=%d seq=%d flags=%s\n",
+                   e->msg.nlmsg_seq, hd->nlmsg_seq,
+                   interpret_netlink_flag_ack(hd->nlmsg_flags));
+        } else {
+            printf("error: error=%d msg.seq=%d seq=%d\n",
+                   e->error, e->msg.nlmsg_seq, hd->nlmsg_seq);
+        }
+    } else if(hd->nlmsg_type == GENL_ID_CTRL) {
+        struct genlmsghdr* g = (struct genlmsghdr*)buf;
+
+        if(g->cmd == CTRL_CMD_GETFAMILY) {
+            printf("getfamily rsp: seq=%d len=%zu\n", hd->nlmsg_seq, len);
+        } else {
+            printf("genlmsg: cmd=%s ver=%"PRIu8" seq=%d len=%zu "
+                   "flags=%"PRIx32"\n",
+                   interpret_genetlink_cmd(g->cmd), g->version,
+                   hd->nlmsg_seq, len,
+                   hd->nlmsg_flags);
+        }
+    } else {
+        printf("don't know how to handle: type=%s seq=%d flags=%"PRIx32"\n",
+               interpret_netlink_type(hd->nlmsg_type), hd->nlmsg_seq,
+               hd->nlmsg_flags);
+    }
 }
 
 static ssize_t recv_netlink(int fd, void* buf, size_t len)
@@ -157,15 +210,16 @@ static ssize_t recv_netlink(int fd, void* buf, size_t len)
     if(r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         perror("recvmsg"), exit(1);
 
+    if(r == 0) return 0;
+
     if(sa.nl_family != AF_NETLINK || mhd.msg_namelen != sizeof(sa))
         err(1, "wrong kind of message");
 
-    printf("received: seq=%"PRIu32" type=%s flags=%s\n",
-           nhd.nlmsg_seq,
-           interpret_netlink_type(nhd.nlmsg_type),
-           interpret_netlink_flag(nhd.nlmsg_flags));
+    if(!NLMSG_OK(&nhd, r)) err(1, "truncated message");
 
-    return r > 0 ? r - sizeof(nhd) : 0;
+    handle_incoming(&nhd, buf, r - sizeof(nhd));
+
+    return r - sizeof(nhd);
 }
 
 static void teardown_netlink(int fd)
@@ -202,25 +256,41 @@ void run_event_loop(int nfd) {
     }
 }
 
-static void genl_get_family(void)
+static void genl_get_family()
 {
+
+    // drivers/acpi/event.c:78
+    // https://github.com/torvalds/linux/blob/788a024921c48985939f8241c1ff862a7374d8f9/drivers/acpi/event.c#L78
+    //
+    // #define ACPI_GENL_FAMILY_NAME        "acpi_event"
+    // #define ACPI_GENL_VERSION        0x01
+    // #define ACPI_GENL_MCAST_GROUP_NAME   "acpi_mc_group"
 
     struct {
         struct genlmsghdr ghd;
         struct nlattr a1_hd; uint32_t a1_v;
+        struct nlattr a2_hd; char a2_v[NLA_ALIGN(10+1)]; // strlen("acpi_event") + 1
     } payload = {
         .ghd = {
             .cmd = CTRL_CMD_GETFAMILY,
-            .version = 1, // TODO: reference for this?
+            // net/netlink/genetlink.c:986
+            // https://github.com/torvalds/linux/blob/788a024921c48985939f8241c1ff862a7374d8f9/net/netlink/genetlink.c#L986
+            .version = 0x2,
             0
         },
 
         .a1_hd = {
-            .nla_len = sizeof(struct nlattr) + sizeof(uint32_t),
-            .nla_type = CTRL_ATTR_FAMILY_ID
+            .nla_type = CTRL_ATTR_FAMILY_ID,
+            .nla_len = sizeof(struct nlattr) + sizeof(uint16_t),
         },
         .a1_v = GENL_ID_CTRL,
+
+        .a2_hd = {
+            .nla_len = sizeof(struct nlattr) + 10 + 1,
+            .nla_type = CTRL_ATTR_FAMILY_NAME,
+        },
     };
+    memcpy(payload.a2_v, "acpi_event", 10+1);
 
     enqueue_outbound(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK,
                      &payload, sizeof(payload));
