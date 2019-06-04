@@ -3,13 +3,11 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <poll.h>
-#include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
+#include <stdlib.h> // exit
+#include <unistd.h> // close
 #include <string.h>
 
-#include <asm/types.h>
 #include <linux/genetlink.h>
 #include <linux/netlink.h>
 #include <linux/reboot.h>
@@ -25,6 +23,8 @@ static_assert(NLA_HDRLEN == sizeof(struct nlattr),
 
 typedef void (*power_off_cb)(void*);
 
+#define OUTGOING_BUFFER_LEN 1024
+
 struct state {
     int fd;
     uint16_t family;
@@ -33,7 +33,9 @@ struct state {
     power_off_cb cb;
     void* cb_data;
 
-    struct outbound_msg* outbound_queue;
+    uint32_t outgoing_seq;
+    unsigned char outgoing_buf[OUTGOING_BUFFER_LEN];
+    void* outgoing_buf_free;
 };
 
 // drivers/acpi/event.c:78
@@ -100,30 +102,39 @@ static int setup_netlink(int flags)
 
 struct outbound_msg {
     uint16_t type; uint32_t flags;
-    void* buf; size_t len;
     uint32_t seq;
-
-    struct outbound_msg* next;
+    size_t len;
+    unsigned char buf[];
 };
+
+static inline int outbound_queue_empty(const struct state* st)
+{
+    return st->outgoing_buf_free == st->outgoing_buf;
+}
+
+static inline int outgoing_buf_used(const struct state* st)
+{
+    return st->outgoing_buf_free - (void*)st->outgoing_buf;
+}
+
+static inline int outgoing_buf_available(const struct state* st)
+{
+    return sizeof(st->outgoing_buf) - outgoing_buf_used(st);
+}
 
 static uint32_t enqueue_outbound(struct state* st,
                                  uint16_t type, uint32_t flags,
                                  const void* buf, size_t len)
 {
-    static uint32_t seq;
+    const size_t L = sizeof(struct outbound_msg) + len;
+    if(L > outgoing_buf_available(st)) err(1, "oom in outgoing buffer");
 
-    struct outbound_msg* m = calloc(sizeof(*m), 1);
-    if(!m) err(1, "calloc");
+    struct outbound_msg* m = st->outgoing_buf_free;
+    st->outgoing_buf_free += L;
 
     m->type = type; m->flags = flags; m->len = len;
-    m->buf = malloc(len); if(!m->buf) err(1, "malloc");
-    m->seq = seq++;
+    m->seq = st->outgoing_seq++;
     memcpy(m->buf, buf, len);
-
-    // append
-    struct outbound_msg** p = &st->outbound_queue;
-    while(*p != NULL) p = &(*p)->next;
-    *p = m;
 
     printf("enqueued: seq=%"PRIu32"\n", m->seq);
     return m->seq;
@@ -131,12 +142,14 @@ static uint32_t enqueue_outbound(struct state* st,
 
 static void dequeue_outbound(struct state* st)
 {
-    if(!st->outbound_queue) err(1, "enqueue_outbound on empty queue");
+    if(outbound_queue_empty(st)) err(1, "enqueue_outbound on empty queue");
 
-    struct outbound_msg* m = st->outbound_queue;
-    st->outbound_queue = m->next;
+    struct outbound_msg* m = (struct outbound_msg*)st->outgoing_buf;
+    const size_t L = sizeof(struct outbound_msg) + m->len;
 
-    free(m->buf); free(m);
+    memmove(st->outgoing_buf, st->outgoing_buf + L,
+            (st->outgoing_buf_free - (void*)st->outgoing_buf) - L);
+    st->outgoing_buf_free -= L;
 }
 
 static ssize_t send_netlink(int fd, const struct outbound_msg* m)
@@ -156,7 +169,7 @@ static ssize_t send_netlink(int fd, const struct outbound_msg* m)
 
     struct iovec vs[] = {
         { .iov_base = &nhd, .iov_len = sizeof(nhd) },
-        { .iov_base = m->buf, .iov_len = m->len },
+        { .iov_base = (void*)m->buf, .iov_len = m->len },
     };
 
     struct sockaddr_nl sa = { .nl_family = AF_NETLINK, 0 };
@@ -357,7 +370,7 @@ static void run_event_loop(struct state* st)
     struct pollfd fds[] = { { .fd = st->fd, .events = POLLIN } };
 
     while(1) {
-        if(st->outbound_queue) fds[0].events |= POLLOUT;
+        if(!outbound_queue_empty(st)) fds[0].events |= POLLOUT;
 
         int r = poll(fds, LENGTH(fds), 1000);
         if(r < 0) perror("poll()"), exit(1);
@@ -370,9 +383,9 @@ static void run_event_loop(struct state* st)
         }
 
         if(fds[0].revents & POLLOUT) {
-            (void)send_netlink(st->fd, st->outbound_queue);
+            (void)send_netlink(st->fd, (struct outbound_msg*)st->outgoing_buf);
             dequeue_outbound(st);
-            if(!st->outbound_queue) fds[0].events &= ~POLLOUT;
+            if(outbound_queue_empty(st)) fds[0].events &= ~POLLOUT;
         }
     }
 }
@@ -417,6 +430,8 @@ static void initialize(struct state* st,
     memset(st, 0, sizeof(*st));
     st->cb = cb; st->cb_data = cb_data;
 
+    st->outgoing_buf_free = st->outgoing_buf;
+
     st->fd = setup_netlink(
         (non_blocking ? SOCK_NONBLOCK : 0) | SOCK_CLOEXEC);
 
@@ -427,13 +442,6 @@ static void deinitialize(struct state* st)
 {
     if(close(st->fd) != 0) perror("close"), exit(1);
     st->fd = -1;
-
-    struct outbound_msg* m = st->outbound_queue;
-    while(m) {
-        struct outbound_msg* n = m->next;
-        free(m->buf), free(m);
-        m = n;
-    }
 }
 
 static void power_off(void* opaque)
