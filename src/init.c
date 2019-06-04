@@ -22,6 +22,13 @@ static_assert(GENL_HDRLEN == sizeof(struct genlmsghdr),
               "make sure we don't need any extra alignment (genlmsghdr)");
 static_assert(NLA_HDRLEN == sizeof(struct nlattr),
               "make sure we don't need any extra alignment (nlattr)");
+
+struct state {
+    int fd;
+    uint16_t family;
+    uint32_t mcast_group;
+};
+
 // drivers/acpi/event.c:78
 // https://github.com/torvalds/linux/blob/788a024921c48985939f8241c1ff862a7374d8f9/drivers/acpi/event.c#L78
 #define ACPI_GENL_FAMILY_NAME "acpi_event"
@@ -31,16 +38,6 @@ static_assert(NLA_HDRLEN == sizeof(struct nlattr),
 #define ACPI_GENL_MCAST_GROUP_NAM_LEN 13
 
 #define LENGTH(xs) (sizeof(xs)/sizeof((xs)[0]))
-
-static const char* interpret_netlink_type(uint16_t type)
-{
-    switch(type) {
-    case 0x02: return "NLMSG_ERROR";
-    case 0x10: return "GENL_ID_CTRL"; // := NLMSG_MIN_TYPE
-    default:
-        err(3, "not defined type: %"PRIu16, type);
-    }
-}
 
 const char* interpret_netlink_flag(uint32_t flag)
 {
@@ -73,17 +70,15 @@ static const char* interpret_genetlink_cmd(uint8_t cmd)
     }
 }
 
-static int setup_netlink(int flags)
+static void setup_netlink(struct state* st, int flags)
 {
-    int fd = socket(AF_NETLINK, SOCK_RAW | flags, NETLINK_GENERIC);
-    if(fd < 0) perror("socket()"), exit(1);
+    st->fd = socket(AF_NETLINK, SOCK_RAW | flags, NETLINK_GENERIC);
+    if(st->fd < 0) perror("socket()"), exit(1);
 
     struct sockaddr_nl sa = { .nl_family = AF_NETLINK, 0 };
 
-    int r = bind(fd, (struct sockaddr*)&sa, sizeof(sa));
+    int r = bind(st->fd, (struct sockaddr*)&sa, sizeof(sa));
     if(r != 0) perror("bind()"), exit(1);
-
-    return fd;
 }
 
 struct outbound_msg {
@@ -159,32 +154,34 @@ static ssize_t send_netlink(int fd, const struct outbound_msg* m)
     if(r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         perror("sendto"), exit(1);
 
-    printf("sent: seq=%"PRIu32" type=%s\n",
-           m->seq, interpret_netlink_type(m->type));
+    printf("sent: seq=%"PRIu32" type=%"PRIu16"\n", m->seq, m->type);
 
     return r;
 }
 
-int nfd;
-
-static void handle_mcast_group(const char* name, uint32_t gid)
+static void handle_mcast_group(struct state* st,
+                               const char* name, uint32_t gid)
 {
     if(strncmp(name, ACPI_GENL_MCAST_GROUP_NAM,
                ACPI_GENL_MCAST_GROUP_NAM_LEN) == 0) {
-        int r = setsockopt(nfd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP, &gid, sizeof(gid));
+        st->mcast_group = gid;
+
+        int r = setsockopt(st->fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
+                           &st->mcast_group, sizeof(st->mcast_group));
         if(r != 0) perror("setsockopt()"), exit(1);
         printf("joined mcast group %s\n", name);
     }
 }
 
-static void parse_new_family_payload(const void* buf, size_t len)
+static void parse_new_family_payload(struct state* st,
+                                     const void* buf, size_t len)
 {
     while(len > 0) {
         struct nlattr* a = (struct nlattr*)buf;
 
         if(a->nla_type == CTRL_ATTR_FAMILY_ID) {
-            uint16_t id = *(uint16_t*)(buf + NLA_HDRLEN);
-            printf("family id=%"PRIu16"\n", id);
+            st->family = *(uint16_t*)(buf + NLA_HDRLEN);
+            printf("family id=%"PRIu16"\n", st->family);
         }
 
         if(a->nla_type == CTRL_ATTR_MCAST_GROUPS) {
@@ -216,7 +213,7 @@ static void parse_new_family_payload(const void* buf, size_t len)
 
                 if(gid == -1 || name == NULL) err(1, "malformed mcast group");
 
-                handle_mcast_group(name, gid);
+                handle_mcast_group(st, name, gid);
 
                 b += NLA_ALIGN(g->nla_len);
                 l -= NLA_ALIGN(g->nla_len);
@@ -228,7 +225,7 @@ static void parse_new_family_payload(const void* buf, size_t len)
     }
 }
 
-static void handle_incoming(const struct nlmsghdr* hd,
+static void handle_incoming(struct state* st, const struct nlmsghdr* hd,
                             const void* buf, size_t len)
 {
     if(hd->nlmsg_type == NLMSG_ERROR) {
@@ -246,7 +243,7 @@ static void handle_incoming(const struct nlmsghdr* hd,
         buf += sizeof(*g); len -= sizeof(*g);
 
         if(g->cmd == CTRL_CMD_NEWFAMILY && g->version == 0x2) {
-            parse_new_family_payload(buf, len);
+            parse_new_family_payload(st, buf, len);
         } else {
             printf("unhandled genlmsg: cmd=%s ver=%"PRIu8" seq=%d len=%zu "
                    "flags=%"PRIx32"\n",
@@ -254,14 +251,17 @@ static void handle_incoming(const struct nlmsghdr* hd,
                    hd->nlmsg_seq, len,
                    hd->nlmsg_flags);
         }
+    } else if(hd->nlmsg_type >= NLMSG_MIN_TYPE
+              && st->family == hd->nlmsg_type) {
+        printf("acpi event: seq=%"PRIu32"\n", hd->nlmsg_seq);
     } else {
-        printf("don't know how to handle: type=%s seq=%d flags=%"PRIx32"\n",
-               interpret_netlink_type(hd->nlmsg_type), hd->nlmsg_seq,
-               hd->nlmsg_flags);
+        printf("don't know how to handle: type=%"PRIu16" "
+               "seq=%"PRIu32" flags=%"PRIx32"\n",
+               hd->nlmsg_type, hd->nlmsg_seq, hd->nlmsg_flags);
     }
 }
 
-static ssize_t recv_netlink(int fd, void* buf, size_t len)
+static ssize_t recv_netlink(struct state* st, void* buf, size_t len)
 {
     struct sockaddr_nl sa = { 0 };
     struct nlmsghdr nhd = { 0 };
@@ -276,7 +276,7 @@ static ssize_t recv_netlink(int fd, void* buf, size_t len)
         .msg_iov = vs, .msg_iovlen = LENGTH(vs),
     };
 
-    ssize_t r = recvmsg(fd, &mhd, 0);
+    ssize_t r = recvmsg(st->fd, &mhd, 0);
 
     if(r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         perror("recvmsg"), exit(1);
@@ -288,18 +288,19 @@ static ssize_t recv_netlink(int fd, void* buf, size_t len)
 
     if(!NLMSG_OK(&nhd, r)) err(1, "truncated message");
 
-    handle_incoming(&nhd, buf, r - sizeof(nhd));
+    handle_incoming(st, &nhd, buf, r - sizeof(nhd));
 
     return r - sizeof(nhd);
 }
 
-static void teardown_netlink(int fd)
+static void teardown_netlink(struct state* st)
 {
-    if(close(fd) != 0) perror("close"), exit(1);
+    if(close(st->fd) != 0) perror("close"), exit(1);
+    st->fd = -1;
 }
 
-void run_event_loop(int nfd) {
-    struct pollfd fds[] = { { .fd = nfd, .events = POLLIN } };
+void run_event_loop(struct state* st) {
+    struct pollfd fds[] = { { .fd = st->fd, .events = POLLIN } };
 
     size_t timeouts = 0;
 
@@ -314,13 +315,15 @@ void run_event_loop(int nfd) {
             if(timeouts == 2) break;
         }
 
+        assert(fds[0].fd == st->fd);
+
         if(fds[0].revents & POLLIN) {
             unsigned char buf[4096];
-            (void)recv_netlink(fds[0].fd, buf, sizeof(buf));
+            (void)recv_netlink(st, buf, sizeof(buf));
         }
 
         if(fds[0].revents & POLLOUT) {
-            (void)send_netlink(fds[0].fd, outbound_queue);
+            (void)send_netlink(st->fd, outbound_queue);
             dequeue_outbound();
             if(!outbound_queue) fds[0].events &= ~POLLOUT;
         }
@@ -329,7 +332,6 @@ void run_event_loop(int nfd) {
 
 static void genl_get_family()
 {
-
     struct {
         struct genlmsghdr ghd;
         struct nlattr a1_hd; uint32_t a1_v;
@@ -367,9 +369,11 @@ int main(void)
 
     genl_get_family();
 
-    nfd = setup_netlink(SOCK_NONBLOCK | SOCK_CLOEXEC);
-    run_event_loop(nfd);
-    teardown_netlink(nfd);
+    struct state st = { 0 };
+
+    setup_netlink(&st, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    run_event_loop(&st);
+    teardown_netlink(&st);
 
     printf("good bye...\n");
     (void)reboot(LINUX_REBOOT_CMD_POWER_OFF);
