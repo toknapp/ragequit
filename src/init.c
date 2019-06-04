@@ -158,6 +158,23 @@ static ssize_t send_netlink(int fd, const struct outbound_msg* m)
     return r;
 }
 
+static void parse_new_family_payload(const void* buf, size_t len)
+{
+    while(len > 0) {
+        struct nlattr* a = (struct nlattr*)buf;
+        printf("new family attr: type=%"PRIu16" len=%"PRIu16"\n",
+               a->nla_type, a->nla_len);
+
+        if(a->nla_type == CTRL_ATTR_FAMILY_ID) {
+            uint16_t id = *(uint16_t*)(buf + NLA_HDRLEN);
+            printf("family id=%"PRIu16"\n", id);
+        }
+
+        buf += NLA_ALIGN(a->nla_len);
+        len -= NLA_ALIGN(a->nla_len);
+    }
+}
+
 static void handle_incoming(const struct nlmsghdr* hd,
                             const void* buf, size_t len)
 {
@@ -173,11 +190,12 @@ static void handle_incoming(const struct nlmsghdr* hd,
         }
     } else if(hd->nlmsg_type == GENL_ID_CTRL) {
         struct genlmsghdr* g = (struct genlmsghdr*)buf;
+        buf += sizeof(*g); len -= sizeof(*g);
 
-        if(g->cmd == CTRL_CMD_GETFAMILY) {
-            printf("getfamily rsp: seq=%d len=%zu\n", hd->nlmsg_seq, len);
+        if(g->cmd == CTRL_CMD_NEWFAMILY && g->version == 0x2) {
+            parse_new_family_payload(buf, len);
         } else {
-            printf("genlmsg: cmd=%s ver=%"PRIu8" seq=%d len=%zu "
+            printf("unhandled genlmsg: cmd=%s ver=%"PRIu8" seq=%d len=%zu "
                    "flags=%"PRIx32"\n",
                    interpret_genetlink_cmd(g->cmd), g->version,
                    hd->nlmsg_seq, len,
