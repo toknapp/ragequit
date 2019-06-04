@@ -23,10 +23,17 @@ static_assert(GENL_HDRLEN == sizeof(struct genlmsghdr),
 static_assert(NLA_HDRLEN == sizeof(struct nlattr),
               "make sure we don't need any extra alignment (nlattr)");
 
+typedef void (*power_off_cb)(void*);
+
 struct state {
     int fd;
     uint16_t family;
     uint32_t mcast_group;
+
+    power_off_cb cb;
+    void* cb_data;
+
+    struct outbound_msg* outbound_queue;
 };
 
 // drivers/acpi/event.c:78
@@ -78,15 +85,17 @@ static const char* interpret_genetlink_cmd(uint8_t cmd)
     }
 }
 
-static void setup_netlink(struct state* st, int flags)
+static int setup_netlink(int flags)
 {
-    st->fd = socket(AF_NETLINK, SOCK_RAW | flags, NETLINK_GENERIC);
-    if(st->fd < 0) perror("socket()"), exit(1);
+    int fd = socket(AF_NETLINK, SOCK_RAW | flags, NETLINK_GENERIC);
+    if(fd < 0) perror("socket()"), exit(1);
 
     struct sockaddr_nl sa = { .nl_family = AF_NETLINK, 0 };
 
-    int r = bind(st->fd, (struct sockaddr*)&sa, sizeof(sa));
+    int r = bind(fd, (struct sockaddr*)&sa, sizeof(sa));
     if(r != 0) perror("bind()"), exit(1);
+
+    return fd;
 }
 
 struct outbound_msg {
@@ -97,9 +106,8 @@ struct outbound_msg {
     struct outbound_msg* next;
 };
 
-static struct outbound_msg* outbound_queue;
-
-static uint32_t enqueue_outbound(uint16_t type, uint32_t flags,
+static uint32_t enqueue_outbound(struct state* st,
+                                 uint16_t type, uint32_t flags,
                                  const void* buf, size_t len)
 {
     static uint32_t seq;
@@ -113,7 +121,7 @@ static uint32_t enqueue_outbound(uint16_t type, uint32_t flags,
     memcpy(m->buf, buf, len);
 
     // append
-    struct outbound_msg** p = &outbound_queue;
+    struct outbound_msg** p = &st->outbound_queue;
     while(*p != NULL) p = &(*p)->next;
     *p = m;
 
@@ -121,12 +129,12 @@ static uint32_t enqueue_outbound(uint16_t type, uint32_t flags,
     return m->seq;
 }
 
-static void dequeue_outbound(void)
+static void dequeue_outbound(struct state* st)
 {
-    if(!outbound_queue) err(1, "enqueue_outbound on empty queue");
+    if(!st->outbound_queue) err(1, "enqueue_outbound on empty queue");
 
-    struct outbound_msg* m = outbound_queue;
-    outbound_queue = m->next;
+    struct outbound_msg* m = st->outbound_queue;
+    st->outbound_queue = m->next;
 
     free(m->buf); free(m);
 }
@@ -261,10 +269,19 @@ static void parse_acpi_payload(struct state* st, const void* buf, size_t len) {
         uint32_t data;
     }* event = buf + NLA_HDRLEN;
 
-    printf("device_class=%s\n", event->device_class);
-    printf("bus_id=%s\n", event->bus_id);
-    printf("type=%"PRIu32"\n", event->type);
-    printf("data=%"PRIu32"\n", event->data);
+    if(strncmp(event->device_class, "button/power", 12) == 0) {
+        // drivers/acpi/button.c:30
+        // https://github.com/torvalds/linux/blob/788a024921c48985939f8241c1ff862a7374d8f9/drivers/acpi/button.c#L30
+        if(event->type != 0x80)
+            err(1, "unexpected event type: %"PRIu32, event->type);
+
+        printf("power button has been pressed (%"PRIu32" times)\n",
+               event->data);
+
+        st->cb(st->cb_data);
+    } else {
+        printf("ignoring event for device class: %s\n", event->device_class);
+    }
 }
 
 static void handle_incoming(struct state* st, const struct nlmsghdr* hd,
@@ -294,7 +311,6 @@ static void handle_incoming(struct state* st, const struct nlmsghdr* hd,
         }
     } else if(hd->nlmsg_type >= NLMSG_MIN_TYPE
               && st->family == hd->nlmsg_type) {
-        printf("acpi message: seq=%"PRIu32"\n", hd->nlmsg_seq);
         parse_acpi_payload(st, buf, len);
     } else {
         printf("don't know how to handle: type=%"PRIu16" "
@@ -335,27 +351,16 @@ static ssize_t recv_netlink(struct state* st, void* buf, size_t len)
     return r - sizeof(nhd);
 }
 
-static void teardown_netlink(struct state* st)
+__attribute__((noreturn))
+static void run_event_loop(struct state* st)
 {
-    if(close(st->fd) != 0) perror("close"), exit(1);
-    st->fd = -1;
-}
-
-void run_event_loop(struct state* st) {
     struct pollfd fds[] = { { .fd = st->fd, .events = POLLIN } };
 
-    size_t timeouts = 0;
-
     while(1) {
-        if(outbound_queue) fds[0].events |= POLLOUT;
+        if(st->outbound_queue) fds[0].events |= POLLOUT;
 
         int r = poll(fds, LENGTH(fds), 1000);
         if(r < 0) perror("poll()"), exit(1);
-
-        if(r == 0) {
-            printf("still around... (%zu/2)\n", ++timeouts);
-            if(timeouts == 2) break;
-        }
 
         assert(fds[0].fd == st->fd);
 
@@ -365,14 +370,14 @@ void run_event_loop(struct state* st) {
         }
 
         if(fds[0].revents & POLLOUT) {
-            (void)send_netlink(st->fd, outbound_queue);
-            dequeue_outbound();
-            if(!outbound_queue) fds[0].events &= ~POLLOUT;
+            (void)send_netlink(st->fd, st->outbound_queue);
+            dequeue_outbound(st);
+            if(!st->outbound_queue) fds[0].events &= ~POLLOUT;
         }
     }
 }
 
-static void genl_get_family()
+static void genl_get_family(struct state* st)
 {
     struct {
         struct genlmsghdr ghd;
@@ -401,23 +406,52 @@ static void genl_get_family()
     };
     memcpy(payload.a2_v, ACPI_GENL_FAMILY_NAME, ACPI_GENL_FAMILY_NAME_LEN+1);
 
-    enqueue_outbound(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK,
+    enqueue_outbound(st, GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK,
                      &payload, sizeof(payload));
+}
+
+static void initialize(struct state* st,
+                       int non_blocking,
+                       power_off_cb cb, void* cb_data)
+{
+    memset(st, 0, sizeof(*st));
+    st->cb = cb; st->cb_data = cb_data;
+
+    st->fd = setup_netlink(
+        (non_blocking ? SOCK_NONBLOCK : 0) | SOCK_CLOEXEC);
+
+    genl_get_family(st);
+}
+
+static void deinitialize(struct state* st)
+{
+    if(close(st->fd) != 0) perror("close"), exit(1);
+    st->fd = -1;
+
+    struct outbound_msg* m = st->outbound_queue;
+    while(m) {
+        struct outbound_msg* n = m->next;
+        free(m->buf), free(m);
+        m = n;
+    }
+}
+
+static void power_off(void* opaque)
+{
+    struct state* st = opaque;
+    deinitialize(st);
+
+    printf("good bye...\n");
+
+    (void)reboot(LINUX_REBOOT_CMD_POWER_OFF);
+    perror("reboot(.._POWER_OFF)"), exit(1);
 }
 
 int main(void)
 {
     printf("hello\n");
 
-    genl_get_family();
-
-    struct state st = { 0 };
-
-    setup_netlink(&st, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    struct state st;
+    initialize(&st, /* non_blocking */ 1, power_off, &st);
     run_event_loop(&st);
-    teardown_netlink(&st);
-
-    printf("good bye...\n");
-    (void)reboot(LINUX_REBOOT_CMD_POWER_OFF);
-    perror("reboot(.._POWER_OFF)"), exit(1);
 }
