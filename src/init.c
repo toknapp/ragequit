@@ -37,6 +37,14 @@ struct state {
 #define ACPI_GENL_MCAST_GROUP_NAM "acpi_mc_group"
 #define ACPI_GENL_MCAST_GROUP_NAM_LEN 13
 
+// drivers/acpi/event.c:73
+// https://github.com/torvalds/linux/blob/788a024921c48985939f8241c1ff862a7374d8f9/drivers/acpi/event.c#L73
+#define ACPI_GENL_CMD_EVENT 1
+
+// drivers/acpi/event.c:65
+// https://github.com/torvalds/linux/blob/788a024921c48985939f8241c1ff862a7374d8f9/drivers/acpi/event.c#L65
+#define ACPI_GENL_ATTR_EVENT 1
+
 #define LENGTH(xs) (sizeof(xs)/sizeof((xs)[0]))
 
 const char* interpret_netlink_flag(uint32_t flag)
@@ -225,6 +233,40 @@ static void parse_new_family_payload(struct state* st,
     }
 }
 
+static void parse_acpi_payload(struct state* st, const void* buf, size_t len) {
+    struct genlmsghdr* g = (struct genlmsghdr*)buf;
+    buf += sizeof(*g); len -= sizeof(*g);
+
+    if(g->cmd != ACPI_GENL_CMD_EVENT)
+        err(1, "unexpected command from ACPI: %"PRIu8, g->cmd);
+
+    if(g->version != ACPI_GENL_VERSION)
+        err(1, "unexpected version from ACPI: %"PRIu8, g->version);
+
+    struct nlattr* a = (struct nlattr*)buf;
+
+    if(a->nla_type != ACPI_GENL_ATTR_EVENT)
+        err(1, "unexpected attribute from ACPI: %"PRIu8, a->nla_type);
+
+    len = a->nla_len - NLA_HDRLEN;
+
+    // drivers/acpi/event.c:55
+    // https://github.com/torvalds/linux/blob/788a024921c48985939f8241c1ff862a7374d8f9/drivers/acpi/event.c#L55
+    const struct {
+        // include/acpi/acpi_bus.h:222
+        // https://github.com/torvalds/linux/blob/788a024921c48985939f8241c1ff862a7374d8f9/include/acpi/acpi_bus.h#L222
+        char device_class[20];
+        char bus_id[15];
+        uint32_t type;
+        uint32_t data;
+    }* event = buf + NLA_HDRLEN;
+
+    printf("device_class=%s\n", event->device_class);
+    printf("bus_id=%s\n", event->bus_id);
+    printf("type=%"PRIu32"\n", event->type);
+    printf("data=%"PRIu32"\n", event->data);
+}
+
 static void handle_incoming(struct state* st, const struct nlmsghdr* hd,
                             const void* buf, size_t len)
 {
@@ -248,12 +290,12 @@ static void handle_incoming(struct state* st, const struct nlmsghdr* hd,
             printf("unhandled genlmsg: cmd=%s ver=%"PRIu8" seq=%d len=%zu "
                    "flags=%"PRIx32"\n",
                    interpret_genetlink_cmd(g->cmd), g->version,
-                   hd->nlmsg_seq, len,
-                   hd->nlmsg_flags);
+                   hd->nlmsg_seq, len, hd->nlmsg_flags);
         }
     } else if(hd->nlmsg_type >= NLMSG_MIN_TYPE
               && st->family == hd->nlmsg_type) {
-        printf("acpi event: seq=%"PRIu32"\n", hd->nlmsg_seq);
+        printf("acpi message: seq=%"PRIu32"\n", hd->nlmsg_seq);
+        parse_acpi_payload(st, buf, len);
     } else {
         printf("don't know how to handle: type=%"PRIu16" "
                "seq=%"PRIu32" flags=%"PRIx32"\n",
