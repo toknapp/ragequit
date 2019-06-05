@@ -1,5 +1,7 @@
 # ragequit
 
+[![CircleCI](https://circleci.com/gh/toknapp/ragequit.svg?style=svg)](https://circleci.com/gh/toknapp/ragequit)
+
 A bare metal [header-only library](https://github.com/nothings/stb)
 to convert [ACPI](https://en.wikipedia.org/wiki/Advanced_Configuration_and_Power_Interface)
 events into signals, without using [acpid](https://wiki.archlinux.org/index.php/Acpid)
