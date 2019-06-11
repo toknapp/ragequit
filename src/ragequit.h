@@ -51,6 +51,11 @@ struct ragequit_state {
     void* outgoing_buf_free;
 };
 
+#include <poll.h>
+static void ragequit_pre_poll(const struct ragequit_state* st,
+                              struct pollfd* pfd);
+static void ragequit_post_poll(struct ragequit_state* st,
+                               const struct pollfd* pfd);
 __attribute__((noreturn))
 static void ragequit_run_event_loop(struct ragequit_state* st);
 
@@ -466,29 +471,40 @@ static void ragequit_deinitialize(struct ragequit_state* st)
     st->fd = -1;
 }
 
+static void ragequit_pre_poll(const struct ragequit_state* st,
+                              struct pollfd* pfd)
+{
+    pfd->fd = st->fd;
+    pfd->events = POLLIN | (ragequit__outbound_queue_empty(st) ? 0 : POLLOUT);
+}
+
+static void ragequit_post_poll(struct ragequit_state* st,
+                               const struct pollfd* pfd)
+{
+    assert(pfd->fd == st->fd);
+
+    if(pfd->revents & POLLIN) {
+        unsigned char buf[RAGEQUIT_INCOMING_BUFFER_LEN];
+        (void)ragequit__recv_netlink(st, buf, sizeof(buf));
+    }
+
+    if(pfd->revents & POLLOUT) {
+        (void)ragequit__send_netlink(
+            st->fd, (struct ragequit__outbound_msg*)st->outgoing_buf);
+        ragequit__dequeue_outbound(st);
+    }
+}
+
 static void ragequit_run_event_loop(struct ragequit_state* st)
 {
-    struct pollfd fds[1] = { { .fd = st->fd, .events = POLLIN } };
+    struct pollfd fds[1];
 
     while(1) {
-        if(!ragequit__outbound_queue_empty(st)) fds[0].events |= POLLOUT;
-
+        ragequit_pre_poll(st, &fds[0]);
         int r = poll(fds, 1, 1000);
         if(r < 0) RAGEQUIT_PERROR("poll()");
-
-        assert(fds[0].fd == st->fd);
-
-        if(fds[0].revents & POLLIN) {
-            unsigned char buf[RAGEQUIT_INCOMING_BUFFER_LEN];
-            (void)ragequit__recv_netlink(st, buf, sizeof(buf));
-        }
-
-        if(fds[0].revents & POLLOUT) {
-            (void)ragequit__send_netlink(
-                st->fd, (struct ragequit__outbound_msg*)st->outgoing_buf);
-            ragequit__dequeue_outbound(st);
-            if(ragequit__outbound_queue_empty(st)) fds[0].events &= ~POLLOUT;
-        }
+        else if(r == 1) ragequit_post_poll(st, &fds[0]);
+        else RAGEQUIT_DEBUG("poll timed out");
     }
 }
 
