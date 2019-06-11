@@ -21,6 +21,6 @@ int main(void)
     printf("hello\n");
 
     struct ragequit_state st;
-    ragequit_initialize(&st, /* non_blocking */ 1, power_off, &st);
+    ragequit_initialize(&st, power_off, &st);
     ragequit_run_event_loop(&st);
 }

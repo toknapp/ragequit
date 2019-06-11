@@ -60,7 +60,6 @@ __attribute__((noreturn))
 static void ragequit_run_event_loop(struct ragequit_state* st);
 
 static void ragequit_initialize(struct ragequit_state* st,
-                                int non_blocking,
                                 power_off_cb cb, void* cb_data);
 static void ragequit_deinitialize(struct ragequit_state* st);
 
@@ -451,7 +450,6 @@ static int ragequit__setup_netlink(int flags)
 
 
 static void ragequit_initialize(struct ragequit_state* st,
-                                int non_blocking,
                                 power_off_cb cb, void* cb_data)
 {
     memset(st, 0, sizeof(*st));
@@ -459,8 +457,7 @@ static void ragequit_initialize(struct ragequit_state* st,
 
     st->outgoing_buf_free = st->outgoing_buf;
 
-    st->fd = ragequit__setup_netlink(
-        (non_blocking ? SOCK_NONBLOCK : 0) | SOCK_CLOEXEC);
+    st->fd = ragequit__setup_netlink(SOCK_NONBLOCK | SOCK_CLOEXEC);
 
     ragequit__genl_get_family(st);
 }
