@@ -21,7 +21,8 @@ QEMU_OPTS += -display none
 
 TIMEOUT ?= 10s
 test: $(KERNEL) $(INITRD)
-	sh -i -c 'timeout $(TIMEOUT) $(QEMU) $(QEMU_OPTS) -kernel $(KERNEL) -initrd $(INITRD)'
+	script /dev/null --quiet \
+		--command='timeout $(TIMEOUT) $(QEMU) $(QEMU_OPTS) -kernel $(KERNEL) -initrd $(INITRD)'
 
 build: $(KERNEL) $(INITRD)
 

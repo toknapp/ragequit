@@ -9,7 +9,7 @@ jobs:
           name: Install dependencies
           command: |
             apk --no-progress add --update \
-              make qemu-system-x86_64 socat coreutils bc \
+              make qemu-system-x86_64 socat coreutils bc util-linux \
               gcc musl-dev linux-headers flex bison curl
       - checkout
       - run:
