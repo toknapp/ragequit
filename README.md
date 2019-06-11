@@ -8,5 +8,32 @@ events into signals, without using [acpid](https://wiki.archlinux.org/index.php/
 or any other dependencies (e.g. [libnetlink](https://git.kernel.org/pub/scm/network/iproute2/iproute2.git/tree/lib/libnetlink.c)
 or [libmnl](https://netfilter.org/projects/libmnl/)):
 ```
-Power off button -> ACPI -> netlink -> ragequit -> kill(pid, SIGINT)
+Power off button -> ACPI -> netlink -> ragequit -> callback
+```
+
+## Example
+The following snippet is taken from the tests [`init`](src/init.c) process:
+```c
+#define RAGEQUIT_IMPLEMENTATION
+#include "ragequit.h"
+
+static void power_off(void* opaque)
+{
+    struct ragequit_state* st = opaque;
+    ragequit_deinitialize(st);
+
+    printf("good bye...\n");
+
+    (void)reboot(LINUX_REBOOT_CMD_POWER_OFF);
+    perror("reboot(.._POWER_OFF)"), exit(1);
+}
+
+int main(void)
+{
+    printf("hello\n");
+
+    struct ragequit_state st;
+    ragequit_initialize(&st, power_off, &st);
+    ragequit_run_event_loop(&st);
+}
 ```
