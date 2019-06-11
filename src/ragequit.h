@@ -64,16 +64,37 @@ static void ragequit_deinitialize(struct ragequit_state* st);
 
 #ifdef RAGEQUIT_IMPLEMENTATION
 
+#ifndef RAGEQUIT_WARN
+#include <stdio.h>
+#define RAGEQUIT_WARN(fmt, ...) do { dprintf(2, fmt, ##__VA_ARGS__); } while(0)
+#endif
+
+#ifndef RAGEQUIT_INFO
+#define RAGEQUIT_INFO(fmt, ...) RAGEQUIT_WARN(fmt, ##__VA_ARGS__)
+#endif
+
+#ifndef RAGEQUIT_DEBUG
+#define RAGEQUIT_DEBUG(fmt, ...) do { } while(0)
+#endif
+
+#ifndef RAGEQUIT_ERR
+#include <err.h>
+#define RAGEQUIT_ERR(ec, fmt, ...) do { err(ec, fmt, ##__VA_ARGS__); } while(0)
+#endif
+
+#ifndef RAGEQUIT_PERROR
+#include <stdio.h>
+#define RAGEQUIT_PERROR(fmt, ...) do { perror(fmt, ##__VA_ARGS__); exit(1); } while(0)
+#endif
+
 #ifndef RAGEQUIT_INCOMING_BUFFER_LEN
 #define RAGEQUIT_INCOMING_BUFFER_LEN 256
 #endif
 
 #include <assert.h>
-#include <err.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <poll.h>
-#include <stdio.h>
 #include <stdlib.h> // exit
 #include <unistd.h> // close
 #include <string.h>
@@ -136,7 +157,7 @@ static uint32_t ragequit__enqueue_outbound(struct ragequit_state* st,
 {
     const size_t L = sizeof(struct ragequit__outbound_msg) + len;
     if(L > ragequit__outgoing_buf_available(st))
-        err(1, "oom in outgoing buffer");
+        RAGEQUIT_ERR(1, "oom in outgoing buffer");
 
     struct ragequit__outbound_msg* m = st->outgoing_buf_free;
     st->outgoing_buf_free += L;
@@ -145,14 +166,13 @@ static uint32_t ragequit__enqueue_outbound(struct ragequit_state* st,
     m->seq = st->outgoing_seq++;
     memcpy(m->buf, buf, len);
 
-    printf("enqueued: seq=%"PRIu32"\n", m->seq);
     return m->seq;
 }
 
 static void ragequit__dequeue_outbound(struct ragequit_state* st)
 {
     if(ragequit__outbound_queue_empty(st))
-        err(1, "enqueue_outbound on empty queue");
+        RAGEQUIT_ERR(1, "enqueue_outbound on empty queue");
 
     struct ragequit__outbound_msg* m = (struct ragequit__outbound_msg*)st->outgoing_buf;
     const size_t L = sizeof(struct ragequit__outbound_msg) + m->len;
@@ -167,7 +187,7 @@ static ssize_t ragequit__send_netlink(int fd, const struct ragequit__outbound_ms
 
     size_t msg_len = sizeof(struct nlmsghdr) + m->len;
     if(msg_len > UINT32_MAX || m->len >= UINT32_MAX - sizeof(struct nlmsghdr))
-        err(1, "buffer too big to send");
+        RAGEQUIT_ERR(1, "buffer too big to send");
 
     struct nlmsghdr nhd = {
         .nlmsg_len = msg_len,
@@ -191,7 +211,7 @@ static ssize_t ragequit__send_netlink(int fd, const struct ragequit__outbound_ms
 
     ssize_t r = sendmsg(fd, &mhd, 0);
     if(r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-        perror("sendto"), exit(1);
+        RAGEQUIT_PERROR("sendto");
 
     return r;
 }
@@ -205,7 +225,7 @@ static void ragequit__handle_mcast_group(
 
         int r = setsockopt(st->fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
                            &st->mcast_group, sizeof(st->mcast_group));
-        if(r != 0) perror("setsockopt()"), exit(1);
+        if(r != 0) RAGEQUIT_PERROR("setsockopt()");
     }
 }
 
@@ -239,14 +259,14 @@ static void ragequit__parse_new_family_payload(
                         gid = *(uint32_t*)(c + NLA_HDRLEN); break;
                     case CTRL_ATTR_MCAST_GRP_NAME:
                         name = c + NLA_HDRLEN; break;
-                    default: err(1, "unexpected attr type in a mcast group");
+                    default: RAGEQUIT_ERR(1, "unexpected attr type in a mcast group");
                     }
 
                     c += NLA_ALIGN(ga->nla_len);
                     j -= NLA_ALIGN(ga->nla_len);
                 }
 
-                if(gid == -1 || name == NULL) err(1, "malformed mcast group");
+                if(gid == -1 || name == NULL) RAGEQUIT_ERR(1, "malformed mcast group");
 
                 ragequit__handle_mcast_group(st, name, gid);
 
@@ -267,15 +287,15 @@ static void ragequit__parse_acpi_payload(
     buf += sizeof(*g); len -= sizeof(*g);
 
     if(g->cmd != RAGEQUIT__ACPI_GENL_CMD_EVENT)
-        err(1, "unexpected command from ACPI: %"PRIu8, g->cmd);
+        RAGEQUIT_ERR(1, "unexpected command from ACPI: %"PRIu8, g->cmd);
 
     if(g->version != RAGEQUIT__ACPI_GENL_VERSION)
-        err(1, "unexpected version from ACPI: %"PRIu8, g->version);
+        RAGEQUIT_ERR(1, "unexpected version from ACPI: %"PRIu8, g->version);
 
     struct nlattr* a = (struct nlattr*)buf;
 
     if(a->nla_type != RAGEQUIT__ACPI_GENL_ATTR_EVENT)
-        err(1, "unexpected attribute from ACPI: %"PRIu8, a->nla_type);
+        RAGEQUIT_ERR(1, "unexpected attribute from ACPI: %"PRIu8, a->nla_type);
 
     len = a->nla_len - NLA_HDRLEN;
 
@@ -294,14 +314,15 @@ static void ragequit__parse_acpi_payload(
         // drivers/acpi/button.c:30
         // https://github.com/torvalds/linux/blob/788a024921c48985939f8241c1ff862a7374d8f9/drivers/acpi/button.c#L30
         if(event->type != 0x80)
-            err(1, "unexpected event type: %"PRIu32, event->type);
+            RAGEQUIT_ERR(1, "unexpected event type: %"PRIu32, event->type);
 
-        printf("power button has been pressed (%"PRIu32" times)\n",
-               event->data);
+        RAGEQUIT_INFO("power button has been pressed (%"PRIu32" times)\n",
+                      event->data);
 
         st->cb(st->cb_data);
     } else {
-        printf("ignoring event for device class: %s\n", event->device_class);
+        RAGEQUIT_DEBUG("ignoring event for device class: %s\n",
+                       event->device_class);
     }
 }
 
@@ -313,12 +334,12 @@ static void ragequit__handle_incoming(
     if(hd->nlmsg_type == NLMSG_ERROR) {
         struct nlmsgerr* e = (struct nlmsgerr*)buf;
         if(e->error == 0) {
-            printf("success: msg.seq=%d seq=%d flags=%"PRIu16"\n",
-                   e->msg.nlmsg_seq, hd->nlmsg_seq,
-                   hd->nlmsg_flags);
+            RAGEQUIT_DEBUG("success: msg.seq=%d seq=%d flags=%"PRIu16"\n",
+                           e->msg.nlmsg_seq, hd->nlmsg_seq,
+                           hd->nlmsg_flags);
         } else {
-            printf("error: error=%d msg.seq=%d seq=%d\n",
-                   e->error, e->msg.nlmsg_seq, hd->nlmsg_seq);
+            RAGEQUIT_WARN("error: error=%d msg.seq=%d seq=%d\n",
+                          e->error, e->msg.nlmsg_seq, hd->nlmsg_seq);
         }
     } else if(hd->nlmsg_type == GENL_ID_CTRL) {
         struct genlmsghdr* g = (struct genlmsghdr*)buf;
@@ -327,18 +348,18 @@ static void ragequit__handle_incoming(
         if(g->cmd == CTRL_CMD_NEWFAMILY && g->version == 0x2) {
             ragequit__parse_new_family_payload(st, buf, len);
         } else {
-            printf("unhandled genlmsg: cmd=%"PRIu8" ver=%"PRIu8" seq=%d "
-                   "len=%zu flags=%"PRIx32"\n",
-                   g->cmd, g->version,
-                   hd->nlmsg_seq, len, hd->nlmsg_flags);
+            RAGEQUIT_WARN("unhandled genlmsg: cmd=%"PRIu8" ver=%"PRIu8
+                          " seq=%d len=%zu flags=%"PRIx32"\n",
+                          g->cmd, g->version,
+                          hd->nlmsg_seq, len, hd->nlmsg_flags);
         }
     } else if(hd->nlmsg_type >= NLMSG_MIN_TYPE
               && st->family == hd->nlmsg_type) {
         ragequit__parse_acpi_payload(st, buf, len);
     } else {
-        printf("don't know how to handle: type=%"PRIu16" "
-               "seq=%"PRIu32" flags=%"PRIx32"\n",
-               hd->nlmsg_type, hd->nlmsg_seq, hd->nlmsg_flags);
+        RAGEQUIT_WARN("don't know how to handle: type=%"PRIu16" "
+                      "seq=%"PRIu32" flags=%"PRIx32"\n",
+                      hd->nlmsg_type, hd->nlmsg_seq, hd->nlmsg_flags);
     }
 }
 
@@ -361,14 +382,14 @@ static ssize_t ragequit__recv_netlink(struct ragequit_state* st,
     ssize_t r = recvmsg(st->fd, &mhd, 0);
 
     if(r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-        perror("recvmsg"), exit(1);
+        RAGEQUIT_PERROR("recvmsg");
 
     if(r == 0) return 0;
 
     if(sa.nl_family != AF_NETLINK || mhd.msg_namelen != sizeof(sa))
-        err(1, "wrong kind of message");
+        RAGEQUIT_ERR(1, "wrong kind of message");
 
-    if(!NLMSG_OK(&nhd, r)) err(1, "truncated message");
+    if(!NLMSG_OK(&nhd, r)) RAGEQUIT_ERR(1, "truncated message");
 
     ragequit__handle_incoming(st, &nhd, buf, r - sizeof(nhd));
 
@@ -413,12 +434,12 @@ static void ragequit__genl_get_family(struct ragequit_state* st)
 static int ragequit__setup_netlink(int flags)
 {
     int fd = socket(AF_NETLINK, SOCK_RAW | flags, NETLINK_GENERIC);
-    if(fd < 0) perror("socket()"), exit(1);
+    if(fd < 0) RAGEQUIT_PERROR("socket()");
 
     struct sockaddr_nl sa = { .nl_family = AF_NETLINK, 0 };
 
     int r = bind(fd, (struct sockaddr*)&sa, sizeof(sa));
-    if(r != 0) perror("bind()"), exit(1);
+    if(r != 0) RAGEQUIT_PERROR("bind()");
 
     return fd;
 }
@@ -441,7 +462,7 @@ static void ragequit_initialize(struct ragequit_state* st,
 
 static void ragequit_deinitialize(struct ragequit_state* st)
 {
-    if(close(st->fd) != 0) perror("close"), exit(1);
+    if(close(st->fd) != 0) RAGEQUIT_PERROR("close");
     st->fd = -1;
 }
 
@@ -453,7 +474,7 @@ static void ragequit_run_event_loop(struct ragequit_state* st)
         if(!ragequit__outbound_queue_empty(st)) fds[0].events |= POLLOUT;
 
         int r = poll(fds, 1, 1000);
-        if(r < 0) perror("poll()"), exit(1);
+        if(r < 0) RAGEQUIT_PERROR("poll()");
 
         assert(fds[0].fd == st->fd);
 
