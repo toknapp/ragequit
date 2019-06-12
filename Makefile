@@ -44,10 +44,10 @@ stop:
 # initramfs
 .PHONY: $(INITRD)
 $(INITRD):
-	rm -rf $(BUILD)
-	mkdir -p $(BUILD)
+	rm -rf "$(BUILD)"
+	mkdir -p "$(BUILD)"
 	$(MAKE) -C src install
-	(cd $(BUILD) && find . | cpio --quiet -H newc -o | gzip) > $@
+	(cd "$(BUILD)" && find . | cpio --quiet -H newc -o | gzip) > $@
 
 # kernel
 $(KERNEL): config $(KERNEL_ROOT)
